@@ -4,7 +4,7 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::{SchemaRef};
 use async_trait::async_trait;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::Result;
+use datafusion::error::{Result, DataFusionError};
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType, SendableRecordBatchStream, stream::RecordBatchStreamAdapter, PlanProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -47,7 +47,7 @@ impl TableProvider for NatsDataSource {
         &self,
         _state: &dyn datafusion::catalog::Session,
         _projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let exec = NatsExec {
@@ -59,6 +59,7 @@ impl TableProvider for NatsDataSource {
                 Boundedness::Unbounded { requires_infinite_memory: false }),
             client: self.client.clone(),
             subject: self.subject.clone(),
+            filters: Arc::new(filters.to_vec()),
         };
         Ok(Arc::new(exec))
     }
@@ -70,6 +71,7 @@ struct NatsExec {
     properties: PlanProperties,
     client: Client,
     subject: String,
+    filters: Arc<Vec<Expr>>,
 }
 
 impl DisplayAs for NatsExec {
@@ -119,6 +121,7 @@ impl ExecutionPlan for NatsExec {
         let schema_for_spawn = self.schema.clone();
         let client = self.client.clone();
         let subject = self.subject.clone();
+        let filters_for_spawn = self.filters.clone();
 
         // Create a channel to send RecordBatches from the NATS consumer task
         // to the DataFusion execution stream.
@@ -128,7 +131,13 @@ impl ExecutionPlan for NatsExec {
         // This task runs concurrently with the DataFusion query execution.
         tokio::spawn(async move {
             // Subscribe to the NATS subject.
-            let mut subscriber = client.subscribe(subject).await.unwrap();
+            let mut subscriber = match client.subscribe(subject).await {
+                Ok(sub) => sub,
+                Err(e) => {
+                    let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to subscribe to NATS: {}", e)))).await;
+                    return;
+                }
+            };
 
             // Initialize Arrow array builders for efficient data buffering.
             // Using Arrow's native builders is generally more performant than
@@ -145,14 +154,38 @@ impl ExecutionPlan for NatsExec {
 
                 if parts.len() == 2 {
                     if let Ok(id) = parts[0].parse::<i32>() {
-                        // Append parsed values to the builders.
-                        id_builder.append_value(id);
-                        name_builder.append_value(parts[1]);
+                        // Apply filters. For simplicity, assuming filters are on the 'id' column.
+                        let mut should_include = true;
+                        for filter_expr in filters_for_spawn.iter() {
+                            // This is a very basic example. In a real scenario, you would need
+                            // a more robust expression evaluation engine.
+                            // For now, we assume a filter like `id = 10`
+                            if let Expr::BinaryExpr(binary_expr) = filter_expr {
+                                if let (Expr::Column(col), Expr::Literal(scalar, _)) = (&*binary_expr.left, &*binary_expr.right) {
+                                    if col.name == "id" {
+                                        if let datafusion::scalar::ScalarValue::Int32(Some(filter_id)) = scalar {
+                                            if id != *filter_id {
+                                                should_include = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if should_include {
+                            // Append parsed values to the builders.
+                            id_builder.append_value(id);
+                            name_builder.append_value(parts[1]);
+                        } else {
+                            println!("Filtered out message with id: {}", id);
+                        }
                     } else {
-                        eprintln!("Failed to parse id: {}", parts[0]);
+                        let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to parse id: {}", parts[0])))).await;
                     }
                 } else {
-                    eprintln!("Invalid message format: {}", payload);
+                    let _ = sender.send(Err(DataFusionError::Execution(format!("Invalid message format: {}", payload)))).await;
                 }
 
                 // If enough records are buffered, build a RecordBatch and send it.
@@ -160,8 +193,16 @@ impl ExecutionPlan for NatsExec {
                 if id_builder.len() >= 1000 { 
                     let id_array = id_builder.finish();
                     let name_array = name_builder.finish();
-                    let record_batch = RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]).unwrap();
-                    sender.send(Ok(record_batch)).await.unwrap();
+                    match RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]) {
+                        Ok(record_batch) => {
+                            if let Err(e) = sender.send(Ok(record_batch)).await {
+                                eprintln!("Failed to send record batch: {}", e);
+                            }
+                        },
+                        Err(e) => {
+                            let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to create record batch: {}", e)))).await;
+                        }
+                    }
 
                     // Reset builders for the next batch.
                     id_builder = Int32Array::builder(1024);
@@ -173,8 +214,16 @@ impl ExecutionPlan for NatsExec {
             if id_builder.len() > 0 {
                 let id_array = id_builder.finish();
                 let name_array = name_builder.finish();
-                let record_batch = RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]).unwrap();
-                sender.send(Ok(record_batch)).await.unwrap();
+                match RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]) {
+                    Ok(record_batch) => {
+                        if let Err(e) = sender.send(Ok(record_batch)).await {
+                            eprintln!("Failed to send record batch: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to create record batch: {}", e)))).await;
+                    }
+                }
             }
         });
 
