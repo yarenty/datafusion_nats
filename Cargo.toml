@@ -12,3 +12,6 @@ thiserror = "2.0"
 async-trait = "0.1"
 futures = "0.3"
 tokio-stream = "0.1"
+
+[dev-dependencies]
+datafusion_nats = { path = "." }
