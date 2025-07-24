@@ -1,5 +1,3 @@
-mod nats_connection;
-mod data_source;
 
 use std::sync::Arc;
 
@@ -7,7 +5,8 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::prelude::{SessionContext, SessionConfig};
 use anyhow::Result;
 
-use data_source::NatsDataSource;
+use datafusion_nats::data_source::NatsDataSource;
+use datafusion_nats::nats_connection;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,7 +24,7 @@ async fn main() -> Result<()> {
     ]));
 
     // Create a NatsDataSource
-    let data_source = Arc::new(NatsDataSource::new(schema, nc.clone()));
+    let data_source = Arc::new(NatsDataSource::new(schema, nc.clone(), "test.data".to_string()));
 
     // Register the NatsDataSource as a table
     ctx.register_table("nats_table", data_source)?;
