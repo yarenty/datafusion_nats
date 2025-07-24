@@ -9,18 +9,23 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType, SendableRecordBatchStream, stream::RecordBatchStreamAdapter, PlanProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_expr::EquivalenceProperties;
-use futures::stream;
+use futures::stream::StreamExt;
 use async_nats::Client;
+use datafusion::arrow::array::{Int32Array, ArrayBuilder, StringBuilder};
+use datafusion::arrow::record_batch::RecordBatch;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::mpsc;
 
 #[derive(Debug)]
 pub struct NatsDataSource {
     schema: SchemaRef,
     client: Client,
+    subject: String,
 }
 
 impl NatsDataSource {
-    pub fn new(schema: SchemaRef, client: Client) -> Self {
-        Self { schema, client }
+    pub fn new(schema: SchemaRef, client: Client, subject: String) -> Self {
+        Self { schema, client, subject }
     }
 }
 
@@ -53,6 +58,7 @@ impl TableProvider for NatsDataSource {
                 EmissionType::Both,
                 Boundedness::Unbounded { requires_infinite_memory: false }),
             client: self.client.clone(),
+            subject: self.subject.clone(),
         };
         Ok(Arc::new(exec))
     }
@@ -63,6 +69,7 @@ struct NatsExec {
     schema: SchemaRef,
     properties: PlanProperties,
     client: Client,
+    subject: String,
 }
 
 impl DisplayAs for NatsExec {
@@ -109,9 +116,73 @@ impl ExecutionPlan for NatsExec {
         _partition: usize,
         _context: Arc<datafusion::execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema.clone();
-        let stream = stream::empty();
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        let schema_for_spawn = self.schema.clone();
+        let client = self.client.clone();
+        let subject = self.subject.clone();
+
+        // Create a channel to send RecordBatches from the NATS consumer task
+        // to the DataFusion execution stream.
+        let (sender, receiver) = mpsc::channel(1024);
+
+        // Spawn a new asynchronous task to consume messages from NATS.
+        // This task runs concurrently with the DataFusion query execution.
+        tokio::spawn(async move {
+            // Subscribe to the NATS subject.
+            let mut subscriber = client.subscribe(subject).await.unwrap();
+
+            // Initialize Arrow array builders for efficient data buffering.
+            // Using Arrow's native builders is generally more performant than
+            // collecting into Vecs and then converting, as they are optimized
+            // for memory layout and appending.
+            let mut id_builder = Int32Array::builder(1024);
+            let mut name_builder = StringBuilder::with_capacity(1024, 1024 * 10);
+
+            // Continuously receive messages from the NATS subscription.
+            while let Some(message) = subscriber.next().await {
+                // Parse the payload. Assuming a simple CSV-like format: "id,name"
+                let payload = String::from_utf8_lossy(&message.payload);
+                let parts: Vec<&str> = payload.split(',').collect();
+
+                if parts.len() == 2 {
+                    if let Ok(id) = parts[0].parse::<i32>() {
+                        // Append parsed values to the builders.
+                        id_builder.append_value(id);
+                        name_builder.append_value(parts[1]);
+                    } else {
+                        eprintln!("Failed to parse id: {}", parts[0]);
+                    }
+                } else {
+                    eprintln!("Invalid message format: {}", payload);
+                }
+
+                // If enough records are buffered, build a RecordBatch and send it.
+                // This flushes data in chunks to reduce overhead.
+                if id_builder.len() >= 1000 { 
+                    let id_array = id_builder.finish();
+                    let name_array = name_builder.finish();
+                    let record_batch = RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]).unwrap();
+                    sender.send(Ok(record_batch)).await.unwrap();
+
+                    // Reset builders for the next batch.
+                    id_builder = Int32Array::builder(1024);
+                    name_builder = StringBuilder::with_capacity(1024, 1024 * 10);
+                }
+            }
+
+            // After the NATS stream ends (or is closed), flush any remaining buffered records.
+            if id_builder.len() > 0 {
+                let id_array = id_builder.finish();
+                let name_array = name_builder.finish();
+                let record_batch = RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]).unwrap();
+                sender.send(Ok(record_batch)).await.unwrap();
+            }
+        });
+
+        // Convert the mpsc receiver into a Stream that DataFusion can consume.
+        let stream = ReceiverStream::new(receiver);
+
+        // Return the RecordBatchStreamAdapter, which wraps our custom stream.
+        Ok(Box::pin(RecordBatchStreamAdapter::new(self.schema.clone(), stream)))
     }
     
     fn properties(&self) -> &PlanProperties {
