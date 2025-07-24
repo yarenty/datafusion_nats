@@ -22,6 +22,7 @@ once_cell = "1.19.0"
 derivative = "2.2.0"
 log = "0.4.21"
 maplit = "1.0.2"
+futures-util = "0.3.31"
 
 [dev-dependencies]
 datafusion_nats = { path = "." }

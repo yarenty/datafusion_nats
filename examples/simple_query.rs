@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
 
     info!("Executing SQL query...");
     // Execute a SQL query
-    let df = ctx.sql("SELECT * FROM nats_table limit 3").await?;
+    let df = ctx.sql("SELECT * FROM nats_table").await?;
     info!("SQL query executed.");
 
     info!("Showing results...");
