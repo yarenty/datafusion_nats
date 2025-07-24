@@ -1,59 +1,76 @@
-# Datafusion NATS Integration
+# datafusion-nats
 
-This crate provides a DataFusion `TableProvider` implementation for NATS, allowing DataFusion to query real-time data streams from NATS subjects using SQL.
+`datafusion-nats` provides a DataFusion `TableProvider` implementation for NATS, allowing DataFusion to query real-time data streams from NATS subjects using SQL.
 
 ## Features
 
-- **Datafusion Table Provider**: This crate provides a DataFusion `TableProvider` implementation for NATS, allowing DataFusion to query real-time data streams from NATS subjects using SQL.
-- **NATS Integration**: The crate uses the [async-nats](https://docs.rs/nats) crate to connect to NATS servers and subscribe to subjects for real-time data streaming.
-- **Schema Inference**: The crate infers the schema for the NATS data based on the NATS message payload.
-- **Streaming**: The crate supports streaming data from NATS subjects, allowing real-time analysis and processing of data as it arrives.
-- **Error Handling**: The crate handles errors gracefully, ensuring that the streaming process is robust and error-free.
-- **Documentation**: This crate is well-documented, making it easy to use and understand.
-- **Examples**: The crate provides example code snippets and usage examples, making it easy to get started with NATS integration in DataFusion.
-
-## TODO
-- [x] PoC
-- [ ] Schema Inference/Configuration
-- [ ] Streaming and Real-time Data
-- [ ] Predicate Pushdown
-- [ ] Error Handling and Resilience
-- [ ] Testing, Documentation, and Examples
+- Connects to NATS server and subscribes to a specified subject.
+- Integrates with DataFusion as a `TableProvider`.
+- Supports configurable data schemas.
+- Handles data conversion from NATS messages to Apache Arrow `RecordBatch`es using pluggable codecs (JSON, CSV).
 
 ## Usage
 
 To use `datafusion-nats`, you need to:
-1. Connect to a NATS server.
-2. Define a schema for your NATS data.
-3. Create a `NatsDataSource` instance with the NATS client, schema, and subject.
-4. Register the `NatsDataSource` as a table in a DataFusion `SessionContext`.
-5. Execute SQL queries against the registered table.
+
+1.  Connect to a NATS server.
+2.  Define a schema for your NATS data.
+3.  Register a NATS table in a DataFusion `SessionContext`.
+4.  Execute SQL queries against the registered table.
+
+### Example
 
 ```rust
-use datafusion_nats::NatsDataSource;
-use datafusion::prelude::*;
+use datafusion::prelude::{SessionContext, SessionConfig};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use std::sync::Arc;
+use anyhow::Result;
+use datafusion_nats::reader::{SessionContextExt, TableProperties, ReadEncoding, DataSchemaEncoding, SchemaLocation};
 
-// Connect to a NATS server
-let client = async_nats::connect("nats://localhost:4222").await.unwrap();
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Create a DataFusion session context
+    let config = SessionConfig::new().with_information_schema(true);
+    let ctx = SessionContext::new_with_config(config);
 
-// Define a schema for your NATS data
-let schema = Schema::new(vec![
-    Field::new("id", DataType::Int32, false),
-    Field::new("name", DataType::Utf8, false),
-]);
+    // Define a schema for the NATS data
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
 
-// Create a NatsDataSource instance
-let nats_data_source = NatsDataSource::new(client, schema, "subject");
+    // Create table properties for NATS
+    let nats_props = TableProperties::builder()
+        .nats_option("servers", "nats://localhost:4222")
+        .data_schema_encoding(DataSchemaEncoding::Payload(
+            ReadEncoding::Json,
+            SchemaLocation::Provided(schema.clone()),
+        ))
+        .build();
 
-// Register the NatsDataSource as a table in a DataFusion SessionContext
-let ctx = SessionContext::new();
-ctx.register_table("nats_table", Arc::new(nats_data_source));
+    // Register the NATS table
+    ctx.register_nats("test.data", "nats_table", nats_props).await?;
 
-// Execute SQL queries against the registered table
-let df = ctx.sql("SELECT * FROM nats_table").await.unwrap();
-let results = df.collect().await.unwrap();
+    // Execute a SQL query
+    let df = ctx.sql("SELECT id, name FROM nats_table").await?;
+
+    // Print the results
+    df.show().await?;
+
+    Ok(())
+}
 ```
 
-## License
+## Building and Testing
 
-This crate is distributed under the Apache License, Version 2.0.
+To build the project, navigate to the `datafusion_nats` directory and run:
+
+```bash
+cargo build
+```
+
+To run the tests, use:
+
+```bash
+cargo test
+```

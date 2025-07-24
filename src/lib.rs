@@ -27,11 +27,13 @@
 //! use datafusion::arrow::datatypes::{DataType, Field, Schema};
 //! use std::sync::Arc;
 //! use anyhow::Result;
+//! use datafusion_nats::reader::{SessionContextExt, TableProperties, ReadEncoding, DataSchemaEncoding, SchemaLocation};
 //! 
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
-//!     // Create a NATS connection
-//!     let client = datafusion_nats::nats_connection::connect("nats://localhost:4222").await?;
+//!     // Create a DataFusion session context
+//!     let config = SessionConfig::new().with_information_schema(true);
+//!     let ctx = SessionContext::new_with_config(config);
 //! 
 //!     // Define a schema for the NATS data
 //!     let schema = Arc::new(Schema::new(vec![
@@ -39,19 +41,17 @@
 //!         Field::new("name", DataType::Utf8, false),
 //!     ]));
 //! 
-//!     // Create a NatsDataSource
-//!     let data_source = Arc::new(datafusion_nats::data_source::NatsDataSource::new(
-//!         schema.clone(),
-//!         client.clone(),
-//!         "test.data".to_string(),
-//!     ));
+//!     // Create table properties for NATS
+//!     let nats_props = TableProperties::builder()
+//!         .nats_option("servers", "nats://localhost:4222")
+//!         .data_schema_encoding(DataSchemaEncoding::Payload(
+//!             ReadEncoding::Json,
+//!             SchemaLocation::Provided(schema.clone()),
+//!         ))
+//!         .build();
 //! 
-//!     // Create a DataFusion session context
-//!     let config = SessionConfig::new().with_information_schema(true);
-//!     let ctx = SessionContext::new_with_config(config);
-//! 
-//!     // Register the NatsDataSource as a table
-//!     ctx.register_table("nats_table", data_source)?;
+//!     // Register the NATS table
+//!     ctx.register_nats("test.data", "nats_table", nats_props).await?;
 //! 
 //!     // Execute a SQL query
 //!     let df = ctx.sql("SELECT id, name FROM nats_table").await?;
@@ -66,7 +66,41 @@
 //! ## Modules
 //! 
 //! - `nats_connection`: Handles NATS client connection and subscription.
-//! - `data_source`: Implements DataFusion `TableProvider` and `ExecutionPlan` for NATS data.
+//! - `reader`: Implements DataFusion `TableProvider` and `ExecutionPlan` for NATS data, including schema and format handling.
+
+
+
 
 pub mod nats_connection;
-pub mod data_source;
+pub mod reader;
+pub mod writer;
+
+use datafusion::error::DataFusionError;
+use std::fmt::{self, Display, Formatter};
+
+pub type Result<T> = std::result::Result<T, DataFusionNatsError>;
+
+#[derive(Debug)]
+pub enum DataFusionNatsError {
+    /// Arrow error
+    Arrow(datafusion::arrow::error::ArrowError),
+    /// DataFusion error
+    DataFusion(DataFusionError),
+    /// Error from data format
+    Format(String),
+    /// General error
+    General(String),
+}
+
+impl Display for DataFusionNatsError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            DataFusionNatsError::Arrow(e) => write!(f, "Arrow error: {}", e),
+            DataFusionNatsError::DataFusion(e) => write!(f, "DataFusion error: {}", e),
+            DataFusionNatsError::Format(e) => write!(f, "Format error: {}", e),
+            DataFusionNatsError::General(e) => write!(f, "General error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for DataFusionNatsError {}
