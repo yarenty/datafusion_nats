@@ -132,9 +132,14 @@ impl ExecutionPlan for NatsExec {
         tokio::spawn(async move {
             // Subscribe to the NATS subject.
             let mut subscriber = match client.subscribe(subject).await {
-                Ok(sub) => sub,
+                Ok(sub) => {
+                    tracing::info!("NATS subscriber created for subject: {}", subject);
+                    sub
+                },
                 Err(e) => {
-                    let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to subscribe to NATS: {}", e)))).await;
+                    let error_msg = format!("Failed to subscribe to NATS: {}", e);
+                    tracing::error!("{}", error_msg);
+                    let _ = sender.send(Err(DataFusionError::Execution(error_msg))).await;
                     return;
                 }
             };
@@ -148,6 +153,7 @@ impl ExecutionPlan for NatsExec {
 
             // Continuously receive messages from the NATS subscription.
             while let Some(message) = subscriber.next().await {
+                tracing::debug!("Received NATS message: {:?}", message);
                 // Parse the payload. Assuming a simple CSV-like format: "id,name"
                 let payload = String::from_utf8_lossy(&message.payload);
                 let parts: Vec<&str> = payload.split(',').collect();
@@ -166,6 +172,7 @@ impl ExecutionPlan for NatsExec {
                                         if let datafusion::scalar::ScalarValue::Int32(Some(filter_id)) = scalar {
                                             if id != *filter_id {
                                                 should_include = false;
+                                                tracing::debug!("Message filtered out by ID: {}", id);
                                                 break;
                                             }
                                         }
@@ -178,14 +185,19 @@ impl ExecutionPlan for NatsExec {
                             // Append parsed values to the builders.
                             id_builder.append_value(id);
                             name_builder.append_value(parts[1]);
+                            tracing::debug!("Message included: id={}, name={}", id, parts[1]);
                         } else {
-                            println!("Filtered out message with id: {}", id);
+                            tracing::info!("Filtered out message with id: {}", id);
                         }
                     } else {
-                        let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to parse id: {}", parts[0])))).await;
+                        let error_msg = format!("Failed to parse id: {}", parts[0]);
+                        tracing::error!("{}", error_msg);
+                        let _ = sender.send(Err(DataFusionError::Execution(error_msg))).await;
                     }
                 } else {
-                    let _ = sender.send(Err(DataFusionError::Execution(format!("Invalid message format: {}", payload)))).await;
+                    let error_msg = format!("Invalid message format: {}", payload);
+                    tracing::error!("{}", error_msg);
+                    let _ = sender.send(Err(DataFusionError::Execution(error_msg))).await;
                 }
 
                 // If enough records are buffered, build a RecordBatch and send it.
@@ -195,12 +207,15 @@ impl ExecutionPlan for NatsExec {
                     let name_array = name_builder.finish();
                     match RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]) {
                         Ok(record_batch) => {
+                            tracing::debug!("Sending record batch with {} rows.", record_batch.num_rows());
                             if let Err(e) = sender.send(Ok(record_batch)).await {
-                                eprintln!("Failed to send record batch: {}", e);
+                                tracing::error!("Failed to send record batch: {}", e);
                             }
                         },
                         Err(e) => {
-                            let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to create record batch: {}", e)))).await;
+                            let error_msg = format!("Failed to create record batch: {}", e);
+                            tracing::error!("{}", error_msg);
+                            let _ = sender.send(Err(DataFusionError::Execution(error_msg))).await;
                         }
                     }
 
@@ -216,15 +231,19 @@ impl ExecutionPlan for NatsExec {
                 let name_array = name_builder.finish();
                 match RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]) {
                     Ok(record_batch) => {
+                        tracing::debug!("Sending final record batch with {} rows.", record_batch.num_rows());
                         if let Err(e) = sender.send(Ok(record_batch)).await {
-                            eprintln!("Failed to send record batch: {}", e);
+                            tracing::error!("Failed to send final record batch: {}", e);
                         }
                     },
                     Err(e) => {
-                        let _ = sender.send(Err(DataFusionError::Execution(format!("Failed to create record batch: {}", e)))).await;
+                        let error_msg = format!("Failed to create final record batch: {}", e);
+                        tracing::error!("{}", error_msg);
+                        let _ = sender.send(Err(DataFusionError::Execution(error_msg))).await;
                     }
                 }
             }
+            tracing::info!("NATS message consumption task finished.");
         });
 
         // Convert the mpsc receiver into a Stream that DataFusion can consume.
