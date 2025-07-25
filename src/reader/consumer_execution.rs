@@ -1,21 +1,26 @@
-use super::execution::Execution;
-use super::BatchHandlerBuilder;
+use crate::reader::execution::Execution;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::common::stats::Precision;
-use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_plan::expressions::PhysicalSortExpr;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
-use datafusion::physical_plan::{DisplayAs, ExecutionPlan, Partitioning, PlanProperties, SendableRecordBatchStream, Statistics};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream, Statistics};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use derivative::Derivative;
 use std::any::Any;
+use std::fmt::Formatter;
 use std::sync::Arc;
+use datafusion::common::DataFusionError;
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use typed_builder::TypedBuilder;
+use crate::reader::batch_handler::BatchHandlerBuilder;
+use crate::Result;
 
-#[derive(Derivative, Clone, TypedBuilder)]
+#[derive(Derivative, Clone, TypedBuilder, Debug)]
 #[derivative(Debug)]
-pub struct NatsExecutionPlan<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static> {
+pub struct NatsExecutionPlan {
+    properties: PlanProperties,
+    metrics: ExecutionPlanMetricsSet,
     /// Subject to read messages from
     #[builder(default, setter(into))]
     subject: String,
@@ -29,7 +34,7 @@ pub struct NatsExecutionPlan<B: BatchHandlerBuilder + std::fmt::Debug + Sync + S
 
     /// Given handler builder
     #[derivative(Debug = "ignore")]
-    handler_builder: Arc<B>,
+    handler_builder: dyn BatchHandlerBuilder,
 
     /// size of batch channel before it blocks
     #[builder(default, setter(strip_option), setter(into))]
@@ -38,21 +43,54 @@ pub struct NatsExecutionPlan<B: BatchHandlerBuilder + std::fmt::Debug + Sync + S
     #[derivative(Debug = "ignore")]
     client: Arc<async_nats::Client>,
 
-    /// Currently there is a need for periodically poll of NATS consumer
-    /// in order to keep connection alive. Thus we keep this watcher reference
-    /// to keep the task alive and stop it once we finish with execution
-    #[derivative(Debug = "ignore")]
-    watcher: Arc<super::table::ClientWatcher>,
 }
 
-impl<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static> Drop for NatsExecutionPlan<B> {
+impl NatsExecutionPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subject: String,
+        schema: SchemaRef,
+        batch_size: Option<usize>,
+        handler_builder: Arc<dyn BatchHandlerBuilder>,
+        batch_channel_size: Option<usize>,
+        client: Arc<async_nats::Client>,
+    ) -> Self {
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::RoundRobinBatch(batch_size.unwrap_or(1)),
+            EmissionType::Incremental,
+            Boundedness::Bounded
+        );
+        let metrics = ExecutionPlanMetricsSet::new();
+
+        Self {
+            properties,
+            metrics,
+            subject,
+            schema,
+            batch_size,
+            handler_builder,
+            batch_channel_size,
+            client
+        }
+    }
+}
+
+impl Drop for NatsExecutionPlan {
     fn drop(&mut self) {
         log::debug!("execution plan executed (and dropped)!")
     }
 }
 
+impl DisplayAs for NatsExecutionPlan {
+    fn fmt_as(&self, _t: DisplayFormatType, _f: &mut Formatter) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+
 #[async_trait]
-impl<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static> ExecutionPlan for NatsExecutionPlan<B> {
+impl ExecutionPlan for NatsExecutionPlan {
     fn name(&self) -> &str {
         todo!()
     }
@@ -75,7 +113,7 @@ impl<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static> Execution
     }
 
     fn with_new_children(
-        self: Arc<NatsExecutionPlan<B>>,
+        self: Arc<NatsExecutionPlan>,
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
@@ -83,7 +121,7 @@ impl<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static> Execution
 
     fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         if partition != 0 {
-            return Err(datafusion::error::DataFusionError::Execution(
+            return Err(crate::DatafusionNatsError::General(
                 "NatsExecutionPlan only supports a single partition (0).".to_string(),
             ));
         }
@@ -98,7 +136,6 @@ impl<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static> Execution
 
         let client = self.client.clone();
         let handler_builder = self.handler_builder.clone();
-        let watcher = self.watcher.clone();
 
         log::debug!(
             "execution handle for subject: [{}], (session_id: [{}], task_id: [{:?}])",
@@ -114,10 +151,9 @@ impl<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static> Execution
                 batch_size,
                 schema,
                 subscriber,
-                watcher,
-                batch_stream.tx(),
+                <tokio::sync::mpsc::Sender<std::result::Result<datafusion::arrow::array::RecordBatch, DataFusionError>> as Into<T>>::into(batch_stream.tx()).clone(),
                 handler_builder,
-            ).await
+            ).await.map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
         };
 
         batch_stream.spawn(message_processor_task);

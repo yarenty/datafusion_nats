@@ -69,38 +69,11 @@
 //! - `reader`: Implements DataFusion `TableProvider` and `ExecutionPlan` for NATS data, including schema and format handling.
 
 
-
-
 pub mod nats_connection;
 pub mod reader;
-pub mod writer;
+pub mod error;
+mod data_schema;
+mod trace_message;
+// pub mod writer;
 
-use datafusion::error::DataFusionError;
-use std::fmt::{self, Display, Formatter};
-
-pub type Result<T> = std::result::Result<T, DataFusionNatsError>;
-
-#[derive(Debug)]
-pub enum DataFusionNatsError {
-    /// Arrow error
-    Arrow(datafusion::arrow::error::ArrowError),
-    /// DataFusion error
-    DataFusion(DataFusionError),
-    /// Error from data format
-    Format(String),
-    /// General error
-    General(String),
-}
-
-impl Display for DataFusionNatsError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            DataFusionNatsError::Arrow(e) => write!(f, "Arrow error: {}", e),
-            DataFusionNatsError::DataFusion(e) => write!(f, "DataFusion error: {}", e),
-            DataFusionNatsError::Format(e) => write!(f, "Format error: {}", e),
-            DataFusionNatsError::General(e) => write!(f, "General error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for DataFusionNatsError {}
+pub use error::{DatafusionNatsError, Result};

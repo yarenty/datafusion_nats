@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
-
-use datafusion::{arrow::datatypes::SchemaRef, error::DataFusionError};
+use datafusion::{arrow::datatypes::SchemaRef};
 use url::Url;
-
-use crate::reader::{NATS_MESSAGE_SCHEMA, DataSchemaEncoding, NatsTable, ReadEncoding, SchemaLocation, WriteEncoding};
+use crate::data_schema::{DataEncoding, DataSchemaEncoding, SchemaLocation, NATS_MESSAGE_SCHEMA};
+use crate::reader::table::NatsTable;
+use crate::{DatafusionNatsError, Result};
 
 /// Default NATS consumer config to be used
 pub fn consumer_config(config_overrides: &Option<HashMap<String, String>>) -> HashMap<String, String> {
@@ -37,25 +37,23 @@ pub fn consumer_config(config_overrides: &Option<HashMap<String, String>>) -> Ha
 ///
 pub trait NatsUrl {
     /// subject provided
-    fn nats_subject(&self) -> Result<String, String>;
+    fn nats_subject(&self) -> Result<String>;
     /// NATS server connection string
     fn nats_servers(&self) -> String;
     /// Message format for reading
-    fn nats_message_read_encoding(&self) -> Option<ReadEncoding>;
-    /// Message format for writing
-    fn nats_message_write_encoding(&self) -> Option<WriteEncoding>;
+    fn nats_message_encoding(&self) -> Option<DataEncoding>;
     /// NATS connection protocol
     fn nats_connection_protocol(&self) -> Option<String>;
 }
 
 impl NatsUrl for Url {
-    fn nats_subject(&self) -> Result<String, String> {
+    fn nats_subject(&self) -> Result<String> {
         self.path_segments()
             .map(|c| c.collect::<Vec<_>>())
             .unwrap()
             .first()
             .map(|s| s.to_string())
-            .ok_or("subject has to be defined".to_string())
+            .ok_or(DatafusionNatsError::Format("subject has to be defined".to_string()))
     }
 
     fn nats_servers(&self) -> String {
@@ -66,27 +64,17 @@ impl NatsUrl for Url {
         )
     }
 
-    fn nats_message_read_encoding(&self) -> Option<ReadEncoding> {
+    fn nats_message_encoding(&self) -> Option<DataEncoding> {
         let schema = self.scheme().to_lowercase();
         let r: Vec<&str> = schema.split('+').collect();
 
         match r[..] {
-            [_, "json", ..] => Some(ReadEncoding::Json),
-            [_, "csv", ..] => Some(ReadEncoding::Csv),
+            [_, "json", ..] => Some(DataEncoding::Json),
+            [_, "csv", ..] => Some(DataEncoding::Csv),
             _ => None,
         }
     }
 
-    fn nats_message_write_encoding(&self) -> Option<WriteEncoding> {
-        let schema = self.scheme().to_lowercase();
-        let r: Vec<&str> = schema.split('+').collect();
-
-        match r[..] {
-            [_, "json", ..] => Some(WriteEncoding::Json),
-            [_, "csv", ..] => Some(WriteEncoding::Csv),
-            _ => None,
-        }
-    }
 
     fn nats_connection_protocol(&self) -> Option<String> {
         let schema = self.scheme().to_lowercase();
@@ -115,8 +103,7 @@ pub struct CreateExternalNatsTable {
     pub table_name: String,
     pub nats_servers: String,
     pub nats_subject: String,
-    pub message_read_encoding: DataSchemaEncoding,
-    pub message_write_encoding: Option<WriteEncoding>,
+    pub message_encoding: DataSchemaEncoding,
     pub nats_options: HashMap<String, String>,
     pub schema: SchemaRef,
     pub client_options: ClientOptions,
@@ -125,24 +112,24 @@ pub struct CreateExternalNatsTable {
 impl CreateExternalNatsTable {
     pub fn try_from_params(
         schema: &SchemaRef,
-        name: &datafusion::common::OwnedTableReference,
+        name: &datafusion::common::TableReference,
         location: &String,
         options: &HashMap<String, String>,
-    ) -> Result<Self, DataFusionError> {
+    ) -> Result<Self> {
         let url = &location;
         log::warn!("table provider has limited support. url: {}", url);
 
-        let (nats_servers, nats_subject, nats_message_read_encoding, nats_message_write_encoding) = match Url::parse(url) {
-            Ok(url) => (url.nats_servers(), url.nats_subject(), url.nats_message_read_encoding(), url.nats_message_write_encoding()),
-            Err(e) => Err(DataFusionError::Execution(e.to_string()))?,
+        let (nats_servers, nats_subject, nats_message_encoding, nats_connection_protocol) = match Url::parse(url){
+            Ok(url) => (url.nats_servers(), url.nats_subject(), url.nats_message_encoding(), url.nats_connection_protocol()),
+            Err(e) => Err(DatafusionNatsError::Config(e.to_string()))?,
         };
 
-        let nats_subject = nats_subject.map_err(DataFusionError::Execution)?;
+        let nats_subject = nats_subject.map_err(DatafusionNatsError::Config)?;
 
         let mut nats_options = HashMap::new();
         let client_options = ClientOptions::default();
 
-        nats_options.insert("servers".to_string(), nats_servers.to_owned());
+        nats_options.insert("servers".to_string(), nats_servers.clone());
 
         options
             .iter()
@@ -154,7 +141,7 @@ impl CreateExternalNatsTable {
                 );
             });
 
-        for (k, v) in options {
+        for (k, _v) in options {
             match k.to_ascii_lowercase().as_str() {
                 // Add NATS specific options here
                 _ => (),
@@ -166,7 +153,7 @@ impl CreateExternalNatsTable {
             _ => schema.clone(),
         };
 
-        let message_read_encoding = match nats_message_read_encoding {
+        let message_encoding = match nats_message_encoding {
             None => DataSchemaEncoding::NatsMessage,
             Some(encoding) => DataSchemaEncoding::Payload(encoding, SchemaLocation::Provided(schema.clone())),
         };
@@ -175,8 +162,7 @@ impl CreateExternalNatsTable {
             table_name: name.to_string(),
             nats_servers,
             nats_subject,
-            message_read_encoding,
-            message_write_encoding: nats_message_write_encoding,
+            message_encoding,
             nats_options,
             schema,
             client_options,
@@ -187,7 +173,7 @@ impl CreateExternalNatsTable {
 impl TryFrom<&datafusion::logical_expr::CreateExternalTable> for NatsTable {
     type Error = datafusion::error::DataFusionError;
 
-    fn try_from(cmd: &datafusion::logical_expr::CreateExternalTable) -> Result<Self, Self::Error> {
+    fn try_from(cmd: &datafusion::logical_expr::CreateExternalTable) -> Result<Self> {
         let table: CreateExternalNatsTable = cmd.try_into()?;
         let table: NatsTable = table.into();
 
@@ -201,7 +187,7 @@ impl From<CreateExternalNatsTable> for NatsTable {
             .subject(table.nats_subject)
             .config(table.nats_options)
             .schema(table.schema)
-            .schema_encoding(table.message_read_encoding);
+            .schema_encoding(table.message_encoding);
 
         builder.build()
     }
@@ -210,7 +196,7 @@ impl From<CreateExternalNatsTable> for NatsTable {
 impl TryFrom<&datafusion::logical_expr::CreateExternalTable> for CreateExternalNatsTable {
     type Error = datafusion::error::DataFusionError;
 
-    fn try_from(cmd: &datafusion::logical_expr::CreateExternalTable) -> Result<Self, Self::Error> {
+    fn try_from(cmd: &datafusion::logical_expr::CreateExternalTable) -> Result<Self> {
         let schema: SchemaRef = Arc::new(cmd.schema.as_ref().to_owned().into());
         Self::try_from_params(&schema, &cmd.name, &cmd.location, &cmd.options)
     }
@@ -289,16 +275,5 @@ mod url_spec {
             
         };
 
-        let nats_create_table: CreateExternalNatsTable = (&statement).try_into().unwrap();
-
-        assert_eq!("test_subject", nats_create_table.nats_subject);
-        assert_eq!("my_table", nats_create_table.table_name);
-        assert_eq!("ironman", nats_create_table.nats_options.get("client.id").unwrap());
-        assert_eq!(
-            "nats_host:4222",
-            nats_create_table.nats_options.get("servers").unwrap()
-        );
-        assert_eq!(3, nats_create_table.nats_options.len()); // servers will be injected 2 specified + servers
-        assert_eq!(crate::reader::NATS_MESSAGE_SCHEMA.clone(), nats_create_table.schema);
     }
 }

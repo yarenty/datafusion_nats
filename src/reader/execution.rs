@@ -1,11 +1,12 @@
-use crate::reader::{BatchHandlerBuilder, BatchHandler};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc::*;
+use log;
 use async_nats::Message;
 use futures_util::stream::StreamExt;
+use crate::reader::batch_handler::{BatchHandler, BatchHandlerBuilder};
+use crate::Result;
 
 
 ///
@@ -24,20 +25,24 @@ impl Execution {
     ///
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn message_processor_task<B: BatchHandlerBuilder + std::fmt::Debug + Sync + Send + 'static>(
+    pub(crate) async fn message_processor_task(
         subject: String,
         batch_size: usize,
         schema: SchemaRef,
         mut subscriber: async_nats::Subscriber,
-        watcher: Arc<super::table::ClientWatcher>,
         response_tx: Sender<Result<RecordBatch>>,
-        handler_builder: Arc<B>,
+        handler_builder: Arc<dyn BatchHandlerBuilder>,
     ) -> Result<()> {
         log::debug!(
             "execution thread for subject: [{}] ... started",
             &subject,
         );
-        let mut handler = handler_builder.build(schema.clone(), batch_size).unwrap();
+
+        let mut handler = handler_builder.build( // Clone the sender since it's a channel
+            schema.clone(),
+            batch_size
+        )?;
+
         loop {
             log::trace!(
                 "executor entered loop section for subject: [{}] ...",
@@ -58,13 +63,12 @@ impl Execution {
                     }
                     None => {
                         log::debug!("NATS subscriber closed for subject: [{}]", subject);
-                        match response_tx.send(Ok(handler.finish().unwrap())).await {
+                        match response_tx.send(handler.finish()).await {
                             Ok(_) => log::trace!("batch send successfully"),
                             Err(_) => log::warn!(
                                 "batch send failed (this happens when datafusion does not need more data, or execution is dropped)"
                             ),
                         };
-                        drop(watcher);
                         return Ok(());
                     }
                 };
@@ -78,11 +82,10 @@ impl Execution {
                 }
             }
 
-            match response_tx.send(Ok(handler.finish().unwrap())).await {
+            match response_tx.send(handler.finish()).await {
                 Ok(_) => log::trace!("batch send successfully"),
                 Err(_) => {
                     log::warn!("batch send failed (this happens when datafusion does not need more data, or execution is dropped)");
-                    drop(watcher);
                     return Ok(());
                 }
             };
@@ -90,21 +93,3 @@ impl Execution {
     }
 }
 
-/// Add support to trace received message
-/// which would be computed only if appropriate log level is
-/// configured
-trait TraceMessage {
-    fn trace(&self) -> String;
-}
-
-impl TraceMessage for Message {
-    fn trace(&self) -> String {
-        // try to convert it to string and return string
-        // otherwise just return message default (which does not help much)
-        let result = std::str::from_utf8(&self.payload);
-        match result {
-            Ok(str) => str.to_string(),
-            Err(_) => format!("{:?}", self.payload),
-        }
-    }
-}

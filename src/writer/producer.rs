@@ -2,6 +2,7 @@
 use async_nats::Client;
 use std::sync::Arc;
 use crate::Result;
+use log;
 use datafusion::arrow::record_batch::RecordBatch;
 
 pub struct NatsProducer {

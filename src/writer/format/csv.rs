@@ -1,9 +1,12 @@
 use crate::{DataFusionNatsError, Result};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::csv::writer::WriterBuilder;
+use log;
 use async_trait::async_trait;
 use std::sync::Arc;
 use async_nats::Client;
+use crate::reader::format::csv::CsvWriterFormat;
+use crate::writer::BatchProducer;
 
 pub struct CsvBatchProducer {
     client: Arc<Client>,
@@ -16,9 +19,9 @@ impl CsvBatchProducer {
     }
 }
 
-impl super::super::BatchProducer for CsvBatchProducer {
+impl BatchProducer for CsvBatchProducer {
     fn append_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        let messages = super::CsvWriterFormat::serialize_record_batch(batch)?;
+        let messages = CsvWriterFormat::serialize_record_batch(batch)?;
         for message_payload in messages {
             let client = self.client.clone();
             let subject = self.subject.clone();

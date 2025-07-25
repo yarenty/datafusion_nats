@@ -1,9 +1,12 @@
 use crate::{DataFusionNatsError, Result};
 use datafusion::arrow::record_batch::RecordBatch;
 use serde_json::json;
+use log;
 use async_trait::async_trait;
 use std::sync::Arc;
 use async_nats::Client;
+use crate::reader::format::json::JsonWriterFormat;
+use crate::writer::BatchProducer;
 
 pub struct JsonBatchProducer {
     client: Arc<Client>,
@@ -16,9 +19,9 @@ impl JsonBatchProducer {
     }
 }
 
-impl super::super::BatchProducer for JsonBatchProducer {
+impl BatchProducer for JsonBatchProducer {
     fn append_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        let messages = super::JsonWriterFormat::serialize_record_batch(batch)?;
+        let messages = JsonWriterFormat::serialize_record_batch(batch)?;
         for message_payload in messages {
             let client = self.client.clone();
             let subject = self.subject.clone();
