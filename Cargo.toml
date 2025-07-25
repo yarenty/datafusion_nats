@@ -14,6 +14,7 @@ futures = "0.3"
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+chrono = "0.4"
 
 [dev-dependencies]
 datafusion_nats = { path = "." }
