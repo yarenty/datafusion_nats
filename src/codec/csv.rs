@@ -38,7 +38,7 @@ pub enum CsvCodecError {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CsvCodec {
     schema: SchemaRef,
     field_names: Vec<String>,
@@ -154,12 +154,14 @@ impl CsvCodec {
                 }
                 DataType::Utf8 => {
                     // For Utf8, we just need to ensure the value is not empty
-                    arrays.push(Arc::new(StringBuilder::from(vec![value]).finish()) as Arc<dyn Array>);
+                    let mut builder = StringBuilder::new();
+                    builder.append_value(value);
+                    arrays.push(Arc::new(builder.finish()) as Arc<dyn Array>);
                 }
                 DataType::Timestamp(_, _) => {
                     match NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
                         Ok(dt) => {
-                            let ts = dt.timestamp_nanos_opt().unwrap();
+                            let ts = dt.and_utc().timestamp_nanos_opt().unwrap();
                             arrays.push(Arc::new(TimestampNanosecondArray::from(vec![ts])) as Arc<dyn Array>);
                         }
                         Err(_) => return Err(CsvCodecError::TypeError(format!(
