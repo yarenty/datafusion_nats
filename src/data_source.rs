@@ -2,6 +2,9 @@ use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{SchemaRef};
+use crate::raw_filter::RawFilter;
+use crate::codec::csv::{CsvCodec, CsvCodecError};
+use datafusion::error::DataFusionError;
 use async_trait::async_trait;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{Result, DataFusionError};
@@ -61,19 +64,21 @@ impl TableProvider for NatsDataSource {
             subject: self.subject.clone(),
             filters: Arc::new(filters.to_vec()),
             limit,
+            csv_codec,
         };
         Ok(Arc::new(exec))
     }
 }
 
 #[derive(Debug)]
-struct NatsExec {
-    schema: SchemaRef,
-    properties: PlanProperties,
-    client: Client,
-    subject: String,
-    filters: Arc<Vec<Expr>>,
-    limit: Option<usize>,
+pub struct NatsExec {
+    pub schema: SchemaRef,
+    pub properties: PlanProperties,
+    pub client: Client,
+    pub subject: String,
+    pub filters: Vec<Expr>,
+    pub limit: Option<usize>,
+    pub csv_codec: CsvCodec,
 }
 
 impl DisplayAs for NatsExec {
@@ -120,15 +125,12 @@ impl ExecutionPlan for NatsExec {
         _partition: usize,
         _context: Arc<datafusion::execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let schema_for_spawn = self.schema.clone();
-        let client = self.client.clone();
-        let subject = self.subject.clone();
-        let filters_for_spawn = self.filters.clone();
-        let limit_for_spawn = self.limit;
-
         // Create a channel to send RecordBatches from the NATS consumer task
         // to the DataFusion execution stream.
         let (sender, receiver) = mpsc::channel(1024);
+
+        // Create the filter
+        let raw_filter = RawFilter::new(self.filters.clone(), self.schema.clone());
 
         // Spawn a new asynchronous task to consume messages from NATS.
         // This task runs concurrently with the DataFusion query execution.
@@ -137,9 +139,9 @@ impl ExecutionPlan for NatsExec {
             let _sender = sender.clone();
 
             // Subscribe to the NATS subject.
-            let mut subscriber = match client.subscribe(subject.clone()).await {
+            let mut subscriber = match self.client.subscribe(self.subject.clone()).await {
                 Ok(sub) => {
-                    tracing::info!("NATS subscriber created for subject: {}", &subject);
+                    tracing::info!("NATS subscriber created for subject: {}", &self.subject);
                     sub
                 },
                 Err(e) => {
@@ -151,72 +153,58 @@ impl ExecutionPlan for NatsExec {
             };
 
             // Initialize Arrow array builders for efficient data buffering.
-            // Using Arrow's native builders is generally more performant than
-            // collecting into Vecs and then converting, as they are optimized
-            // for memory layout and appending.
-            let mut id_builder = Int32Array::builder(1024);
-            let mut name_builder = StringBuilder::with_capacity(1024, 1024 * 10);
-
+            let mut arrays = Vec::new();
             let mut records_processed = 0;
 
             // Continuously receive messages from the NATS subscription.
             while let Some(message) = subscriber.next().await {
-                tracing::debug!("Received NATS message: {:?}", message);
-                // Parse the payload. Assuming a simple CSV-like format: "id,name"
-                let payload = String::from_utf8_lossy(&message.payload);
-                let parts: Vec<&str> = payload.split(',').collect();
+                if !raw_filter.should_include(&message) {
+                    continue;
+                }
 
-                if parts.len() == 2 {
-                    if let Ok(id) = parts[0].parse::<i32>() {
-                        // Apply filters. For simplicity, assuming filters are on the 'id' column.
-                        let mut should_include = true;
-                        for filter_expr in filters_for_spawn.iter() {
-                            // This is a very basic example. In a real scenario, you would need
-                            // a more robust expression evaluation engine.
-                            // For now, we assume a filter like `id = 10`
-                            if let Expr::BinaryExpr(binary_expr) = filter_expr {
-                                if let (Expr::Column(col), Expr::Literal(scalar, _)) = (&*binary_expr.left, &*binary_expr.right) {
-                                    if col.name == "id" {
-                                        if let datafusion::scalar::ScalarValue::Int32(Some(filter_id)) = scalar {
-                                            if id != *filter_id {
-                                                should_include = false;
-                                                tracing::debug!("Message filtered out by ID: {}", id);
-                                                break;
-                                            }
-                                        }
-                                    }
+                tracing::debug!("Received NATS message: {:?}", message);
+                // Parse the payload using CsvCodec
+                let payload = String::from_utf8_lossy(&message.payload);
+                match self.csv_codec.parse_payload(&payload) {
+                    Ok(parsed_arrays) => {
+                        // Append parsed arrays to our batch
+                        for (i, array) in parsed_arrays.iter().enumerate() {
+                            if arrays.len() <= i {
+                                // Initialize new builder if needed
+                                let field = self.schema.field(i);
+                                match field.data_type() {
+                                    DataType::Int32 => arrays.push(Int32Array::builder(1024)),
+                                    DataType::Utf8 => arrays.push(StringBuilder::with_capacity(1024, 1024 * 10)),
+                                    _ => return, // We don't support other types yet
+                                }
+                            }
+                            
+                            // Append value to the appropriate builder
+                            if let Some(builder) = arrays.get_mut(i) {
+                                match builder.as_any_mut() {
+                                    Some(builder) => builder.append_value(array.as_ref()),
+                                    None => return, // Invalid builder type
                                 }
                             }
                         }
-
-                        if should_include {
-                            // Append parsed values to the builders.
-                            id_builder.append_value(id);
-                            name_builder.append_value(parts[1]);
-                            tracing::debug!("Message included: id={}, name={}", id, parts[1]);
-                            records_processed += 1;
-                        } else {
-                            tracing::info!("Filtered out message with id: {}", id);
-                        }
-                    } else {
-                        let error_msg = format!("Failed to parse id: {}", parts[0]);
-                        tracing::error!("{}", error_msg);
-                        let _ = _sender.send(Err(DataFusionError::Execution(error_msg))).await;
+                        records_processed += 1;
+                        tracing::debug!("Message included with {} fields", parsed_arrays.len());
                     }
-                } else {
-                    let error_msg = format!("Invalid message format: {}", payload);
-                    tracing::error!("{}", error_msg);
-                    let _ = _sender.send(Err(DataFusionError::Execution(error_msg))).await;
+                    Err(e) => {
+                        tracing::error!("Failed to parse payload: {}", e);
+                        let _ = _sender.send(Err(DataFusionError::Execution(e.to_string()))).await;
+                    }
                 }
 
-                tracing::info!("Built record batch with {} rows.", id_builder.len());
-
                 // If enough records are buffered, build a RecordBatch and send it.
-                // This flushes data in chunks to reduce overhead.
-                if id_builder.len() >= 1000 { 
-                    let id_array = id_builder.finish();
-                    let name_array = name_builder.finish();
-                    match RecordBatch::try_new(schema_for_spawn.clone(), vec![Arc::new(id_array), Arc::new(name_array)]) {
+                if records_processed > 0 && records_processed % 1000 == 0 {
+                    // Convert builders to arrays
+                    let arrays: Vec<Arc<dyn Array>> = arrays.iter_mut()
+                        .map(|builder| builder.finish())
+                        .map(|array| Arc::new(array))
+                        .collect();
+
+                    match self.csv_codec.create_record_batch(arrays) {
                         Ok(record_batch) => {
                             tracing::info!("Sending record batch with {} rows.", record_batch.num_rows());
                             if let Err(e) = _sender.send(Ok(record_batch)).await {
@@ -230,9 +218,8 @@ impl ExecutionPlan for NatsExec {
                         }
                     }
 
-                    // Reset builders for the next batch.
-                    id_builder = Int32Array::builder(1024);
-                    name_builder = StringBuilder::with_capacity(1024, 1024 * 10);
+                    // Reset builders for the next batch
+                    arrays.clear();
                 }
 
                 // Check if limit is reached

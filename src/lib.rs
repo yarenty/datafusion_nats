@@ -70,3 +70,7 @@
 
 pub mod nats_connection;
 pub mod data_source;
+
+pub mod raw_filter;
+
+pub mod codec;
