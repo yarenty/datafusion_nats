@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use datafusion::arrow::array::{ArrayRef, RecordBatch};
-use datafusion::arrow::datatypes::{SchemaRef};
+use datafusion::arrow::array::{Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Date32Builder, Float64Array, Float64Builder, Int32Array, Int32Builder, RecordBatch, StringArray, StringBuilder, TimestampNanosecondArray, TimestampNanosecondBuilder};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::error::DataFusionError;
 use std::collections::VecDeque;
 use std::time::{Instant, Duration};
@@ -91,25 +91,93 @@ impl BatchBuffer {
             return Ok(None);
         }
 
-        // Concatenate arrays from each buffer
-        let mut arrays = Vec::with_capacity(self.buffers.len());
-        // let arrays = self.buffers.iter().map(VecDeque::iter).flatten().collect::<Vec<_>>();
-        for buffer in &self.buffers {
-            if buffer.is_empty() {
-                return Err(DataFusionError::Execution("Empty buffer encountered".to_string()));
+
+            // Concatenate arrays from each buffer
+            let mut arrays = Vec::with_capacity(self.buffers.len());
+            for buffer in &self.buffers {
+                if buffer.is_empty() {
+                    return Err(DataFusionError::Execution("Empty buffer encountered".to_string()));
+                }
+
+                // Create a new array of the same type as the first array in buffer
+                let first_array = buffer.front().unwrap();
+                let data_type = first_array.data_type().clone();
+
+                // Create a new array builder of the appropriate type
+                match data_type {
+                    DataType::Int32 => {
+                        let mut builder = Int32Builder::with_capacity(buffer.len());
+                        for array in buffer.iter() {
+                            let int_array = array.as_ref().as_any().downcast_ref::<Int32Array>().unwrap();
+                            for i in 0..int_array.len() {
+                                builder.append_value(int_array.value(i));
+                            }
+                        }
+                        arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                    }
+                    DataType::Float64 => {
+                        let mut builder = Float64Builder::with_capacity(buffer.len());
+                        for array in buffer.iter() {
+                            let float_array = array.as_ref().as_any().downcast_ref::<Float64Array>().unwrap();
+                            for i in 0..float_array.len() {
+                                builder.append_value(float_array.value(i));
+                            }
+                        }
+                        arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                    }
+                    DataType::Boolean => {
+                        let mut builder = BooleanBuilder::with_capacity(buffer.len());
+                        for array in buffer.iter() {
+                            let bool_array = array.as_ref().as_any().downcast_ref::<BooleanArray>().unwrap();
+                            for i in 0..bool_array.len() {
+                                builder.append_value(bool_array.value(i));
+                            }
+                        }
+                        arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                    }
+                    DataType::Utf8 => {
+                        let mut builder = StringBuilder::with_capacity(buffer.len(), buffer.len() * 10);
+                        for array in buffer.iter() {
+                            let string_array = array.as_ref().as_any().downcast_ref::<StringArray>().unwrap();
+                            for i in 0..string_array.len() {
+                                builder.append_value(string_array.value(i));
+                            }
+                        }
+                        arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                    }
+                    DataType::Timestamp(_, _) => {
+                        let mut builder = TimestampNanosecondBuilder::with_capacity(buffer.len());
+                        for array in buffer.iter() {
+                            let timestamp_array = array.as_ref().as_any().downcast_ref::<TimestampNanosecondArray>().unwrap();
+                            for i in 0..timestamp_array.len() {
+                                builder.append_value(timestamp_array.value(i));
+                            }
+                        }
+                        arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                    }
+                    DataType::Date32 => {
+                        let mut builder = Date32Builder::with_capacity(buffer.len());
+                        for array in buffer.iter() {
+                            let date_array = array.as_ref().as_any().downcast_ref::<Date32Array>().unwrap();
+                            for i in 0..date_array.len() {
+                                builder.append_value(date_array.value(i));
+                            }
+                        }
+                        arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                    }
+                    _ => return Err(DataFusionError::Execution(format!(
+                        "Unsupported data type: {}",
+                        data_type
+                    ))),
+                }
             }
 
-            // Concatenate all arrays in this buffer
-            let concatenated = buffer.iter().flatten().collect::<Vec<_>>()?;
-            arrays.push(concatenated);
-        }
 
         // Create and return the batch
         let batch = RecordBatch::try_new(self.schema.clone(), arrays)
             .map_err(|e| DataFusionError::Execution(
                 format!("Failed to create batch: {}", e)
             ))?;
-
         // Clear the buffers
         self.clear_buffers();
         

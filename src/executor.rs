@@ -77,99 +77,90 @@ impl ExecutionPlan for NatsExec {
         let raw_filter = RawFilter::new(self.filters.clone(), self.schema.clone());
 
         // Spawn a new asynchronous task to consume messages from NATS.
-        tokio::spawn(async move {
-            // Ensure the sender is dropped when the task finishes, signaling the end of the stream.
-            let _sender = sender.clone();
+        tokio::spawn({
+            let codec = self.codec.clone();
+            let buffer = self.buffer.clone();
+            let filters = self.filters.clone();
+            let limit = self.limit;
+            let schema = self.schema.clone();
+            let client = self.client.clone();
+            let subject = self.subject.clone();
 
-            // Subscribe to the NATS subject.
-            let mut subscriber = match self.client.subscribe(self.subject.clone()).await {
-                Ok(sub) => {
-                    tracing::info!("NATS subscriber created for subject: {}", &self.subject);
-                    sub
-                },
-                Err(e) => {
-                    let error_msg = format!("Failed to subscribe to NATS: {}", e);
-                    tracing::error!("{}", error_msg);
-                    let _ = _sender.send(Err(DataFusionError::Execution(error_msg))).await;
-                    return;
-                }
-            };
+            async move {
+                // Ensure the sender is dropped when the task finishes, signaling the end of the stream.
+                let _sender = sender.clone();
 
-            // Continuously receive messages from the NATS subscription.
-            while let Some(message) = subscriber.next().await {
-                if !raw_filter.should_include(&message) {
-                    continue;
-                }
+                // Subscribe to the NATS subject.
+                let mut subscriber = match client.subscribe(subject.clone()).await {
+                    Ok(sub) => {
+                        tracing::info!("NATS subscriber created for subject: {}", &subject);
+                        sub
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Failed to subscribe to NATS: {}", e);
+                        tracing::error!("{}", error_msg);
+                        let _ = _sender.send(Err(DataFusionError::Execution(error_msg))).await;
+                        return;
+                    }
+                };
 
-                tracing::debug!("Received NATS message: {:?}", message);
-                // Parse the payload using CsvCodec
-                let payload = String::from_utf8_lossy(&message.payload);
-                match self.codec.parse_payload(&payload) {
-                    Ok(parsed_arrays) => {
-                        // Add parsed arrays to batch buffer
-                        if let Err(e) =
-                        self.buffer.lock().await.add_row(parsed_arrays)
-                        {
-                            tracing::error!("Failed to add row to batch buffer: {}", e);
-                            let _ = _sender.send(Err(e)).await;
-                            continue;
-                        }
+                // Process messages
+                while let Some(message) = subscriber.next().await {
+                    let payload = String::from_utf8_lossy(&message.payload);
+                    match codec.parse_payload(&payload) {
+                        Ok(parsed_arrays) => {
+                            // Add parsed arrays to batch buffer
+                            if let Err(e) = buffer.lock().await.add_row(parsed_arrays) {
+                                tracing::error!("Failed to add row to batch buffer: {}", e);
+                                let _ = _sender.send(Err(e)).await;
+                                continue;
+                            }
 
-                        // Check if we should create a batch
-                        if self.buffer.lock().await.should_create_batch() {
-                            match self.buffer.lock().await.create_batch() {
-                                Ok(Some(batch)) => {
-                                    tracing::info!("Sending record batch with {} rows.", batch.num_rows());
-                                    if let Err(e) = _sender.send(Ok(batch)).await {
-                                        tracing::error!("Failed to send record batch: {}", e);
+                            // Check if we should create a batch
+                            if buffer.lock().await.should_create_batch() {
+                                match buffer.lock().await.create_batch() {
+                                    Ok(Some(batch)) => {
+                                        tracing::info!("Sending record batch with {} rows.", batch.num_rows());
+                                        if let Err(e) = _sender.send(Ok(batch)).await {
+                                            tracing::error!("Failed to send batch: {}", e);
+                                        }
                                     }
+                                    _ => {}
                                 }
-                                Ok(None) => {
-                                    // No batch created, continue
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to create batch: {}", e);
-                                    let _ = _sender.send(Err(e)).await;
+                            }
+
+                            // Check if limit is reached
+                            if let Some(limit) = limit {
+                                if buffer.lock().await.current_size() >= limit {
+                                    tracing::info!("Limit of {} records reached. Stopping NATS consumption.", limit);
+                                    break;
                                 }
                             }
                         }
+                        Err(e) => {
+                            tracing::error!("Failed to parse payload: {}", e);
+                            let _ = _sender.send(Err(DataFusionError::Execution(e.to_string()))).await;
+                            // let _ = _sender.send(Err(e)).await;
+                        }
+                    }
+                }
 
-                        // Check if limit is reached
-                        if let Some(limit) = self.limit {
-                            if self.buffer.lock().await.current_size() >= limit {
-                                tracing::info!("Limit of {} records reached. Stopping NATS consumption.", limit);
-                                break; // Exit the while loop
+                // Send any remaining records in the buffer
+                if !buffer.lock().await.is_empty() {
+                    match buffer.lock().await.create_batch() {
+                        Ok(Some(batch)) => {
+                            tracing::info!("Sending final record batch with {} rows.", batch.num_rows());
+                            if let Err(e) = _sender.send(Ok(batch)).await {
+                                tracing::error!("Failed to send final batch: {}", e);
                             }
                         }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to parse payload: {}", e);
-                        let _ = _sender.send(Err(DataFusionError::Execution(e.to_string()))).await;
+                        _ => {}
                     }
                 }
-            }
 
-            // Send any remaining records in the buffer
-            if !self.buffer.lock().await.is_empty() {
-                match self.buffer.lock().await.create_batch() {
-                    Ok(Some(batch)) => {
-                        tracing::info!("Sending final record batch with {} rows.", batch.num_rows());
-                        if let Err(e) = _sender.send(Ok(batch)).await {
-                            tracing::error!("Failed to send final record batch: {}", e);
-                        }
-                    }
-                    Ok(None) => {
-                        // No more records to send
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to create final batch: {}", e);
-                        let _ = _sender.send(Err(e)).await;
-                    }
-                }
+                tracing::info!("NATS message consumption task finished.");
             }
-            tracing::info!("NATS message consumption task finished.");
         });
-
         // Convert the mpsc receiver into a Stream that DataFusion can consume.
         let stream = ReceiverStream::new(receiver);
 
