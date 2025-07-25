@@ -7,6 +7,8 @@ use tracing::{info, debug, error};
 use tracing_subscriber;
 
 use datafusion_nats::{nats_connection, data_source::NatsDataSource};
+use datafusion_nats::batch_buffer::{BatchBuffer, BatchBufferConfig};
+use datafusion_nats::codec::csv::CsvCodec;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -60,7 +62,9 @@ async fn main() -> Result<()> {
     debug!("Schema defined.");
 
     // Create a NatsDataSource
-    let data_source = Arc::new(NatsDataSource::new(schema, nc.clone(), "test.data".to_string()));
+    let codec = CsvCodec::new(schema.clone()).expect("Failed to create codec");
+    let buffer = BatchBuffer::new(schema.clone(), BatchBufferConfig::default());
+    let data_source = Arc::new(NatsDataSource::new(schema, nc.clone(), "test.data".to_string(), codec, buffer));
     debug!("NatsDataSource created.");
 
     info!("Registering table 'nats_table'...");

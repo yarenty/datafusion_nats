@@ -3,7 +3,8 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use std::sync::Arc;
 use anyhow::Result;
 use tokio::time::{sleep, Duration};
-
+use datafusion_nats::batch_buffer::{BatchBuffer, BatchBufferConfig};
+use datafusion_nats::codec::csv::CsvCodec;
 use datafusion_nats::nats_connection;
 use datafusion_nats::data_source::NatsDataSource;
 
@@ -41,13 +42,15 @@ async fn test_nats_integration() -> Result<()> {
     ]));
 
     // Create a NatsDataSource
-    let data_source = Arc::new(NatsDataSource::new(schema.clone(), client.clone(), subject.to_string()));
+    let codec = CsvCodec::new(schema.clone()).expect("Failed to create CSV codec");
+    let buffer = BatchBuffer::new(schema.clone(), BatchBufferConfig::default());
+    let data_source = Arc::new(NatsDataSource::new(schema.clone(), client.clone(), subject.to_string(), codec, buffer));
 
     // Register the NatsDataSource as a table
     ctx.register_table("nats_table", data_source)?;
 
     // Execute a SQL query
-    let df = ctx.sql("SELECT id, name FROM nats_table").await?;
+    let df = ctx.sql("SELECT id, name FROM nats_table limit 3").await?;
 
     // Collect the results
     let results = df.collect().await?;
