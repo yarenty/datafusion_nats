@@ -1,14 +1,14 @@
-use datafusion::prelude::{SessionContext, SessionConfig};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use std::sync::Arc;
 use anyhow::Result;
-use tokio::time::{sleep, Duration};
-use tracing::{info, debug, error};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::prelude::{SessionConfig, SessionContext};
+use std::sync::Arc;
+use tokio::time::{Duration, sleep};
+use tracing::{debug, error, info};
 use tracing_subscriber;
 
-use datafusion_nats::{nats_connection, data_source::NatsDataSource};
 use datafusion_nats::batch_buffer::{BatchBuffer, BatchBufferConfig};
 use datafusion_nats::codec::csv::CsvCodec;
+use datafusion_nats::{data_source::NatsDataSource, nats_connection};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,11 +26,7 @@ async fn main() -> Result<()> {
 
     // Data to publish
     let subject = "test.data";
-    let data = vec![
-        "1,apple",
-        "2,banana",
-        "3,orange",
-    ];
+    let data = vec!["1,apple", "2,banana", "3,orange"];
 
     // Spawn a task to publish data after a short delay
     tokio::spawn(async move {
@@ -64,7 +60,13 @@ async fn main() -> Result<()> {
     // Create a NatsDataSource
     let codec = CsvCodec::new(schema.clone()).expect("Failed to create codec");
     let buffer = BatchBuffer::new(schema.clone(), BatchBufferConfig::default());
-    let data_source = Arc::new(NatsDataSource::new(schema, nc.clone(), "test.data".to_string(), codec, buffer));
+    let data_source = Arc::new(NatsDataSource::new(
+        schema,
+        nc.clone(),
+        "test.data".to_string(),
+        codec,
+        buffer,
+    ));
     debug!("NatsDataSource created.");
 
     info!("Registering table 'nats_table'...");
@@ -74,7 +76,9 @@ async fn main() -> Result<()> {
 
     info!("Executing SQL query...");
     // Execute a SQL query
-    let df = ctx.sql("SELECT * FROM nats_table limit 3").await?;
+    // let df = ctx.sql("SELECT * FROM nats_table limit 3").await?;
+    //TODO: FIXME
+    let df = ctx.sql("SELECT * FROM nats_table").await?;
     info!("SQL query executed.");
 
     info!("Showing results...");

@@ -1,11 +1,14 @@
-use std::sync::Arc;
-use datafusion::arrow::array::{Array, StringBuilder, Int32Array, Float64Array, BooleanArray, TimestampNanosecondArray, Date32Array, RecordBatch};
-use datafusion::arrow::datatypes::{Schema, SchemaRef, Field, DataType};
-use datafusion::error::DataFusionError;
-use thiserror::Error;
-use chrono::{NaiveDateTime, NaiveDate};
 use chrono::Datelike;
+use chrono::{NaiveDate, NaiveDateTime};
+use datafusion::arrow::array::{
+    Array, BooleanArray, Date32Array, Float64Array, Int32Array, RecordBatch, StringBuilder,
+    TimestampNanosecondArray,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::error::DataFusionError;
 use std::convert::TryFrom;
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CsvCodecError {
@@ -19,10 +22,7 @@ pub enum CsvCodecError {
     SchemaMismatch(String),
 
     #[error("Invalid value for field {field}: {value}")]
-    InvalidValue {
-        field: String,
-        value: String,
-    },
+    InvalidValue { field: String, value: String },
 
     #[error("Missing required field: {0}")]
     MissingField(String),
@@ -51,7 +51,9 @@ impl CsvCodec {
 
         // Check for empty schema
         if fields.is_empty() {
-            return Err(CsvCodecError::SchemaMismatch("Schema must have at least one field".to_string()));
+            return Err(CsvCodecError::SchemaMismatch(
+                "Schema must have at least one field".to_string(),
+            ));
         }
 
         // Check for duplicate field names
@@ -63,7 +65,9 @@ impl CsvCodec {
 
             // Check for empty field name
             if name.is_empty() {
-                return Err(CsvCodecError::SchemaMismatch("Field name cannot be empty".to_string()));
+                return Err(CsvCodecError::SchemaMismatch(
+                    "Field name cannot be empty".to_string(),
+                ));
             }
 
             // Check for duplicate field name
@@ -73,13 +77,16 @@ impl CsvCodec {
 
             // Check for unsupported data types
             match field.data_type() {
-                DataType::Int32 | DataType::Float64 | DataType::Boolean | DataType::Utf8
-                | DataType::Timestamp(_, _) | DataType::Date32 => {},
+                DataType::Int32
+                | DataType::Float64
+                | DataType::Boolean
+                | DataType::Utf8
+                | DataType::Timestamp(_, _)
+                | DataType::Date32 => {}
                 other => {
                     return Err(CsvCodecError::TypeError(format!(
                         "Unsupported data type: {} in field {}",
-                        other,
-                        name
+                        other, name
                     )));
                 }
             }
@@ -87,7 +94,10 @@ impl CsvCodec {
             field_names.push(name.to_string());
         }
 
-        Ok(Self { schema, field_names })
+        Ok(Self {
+            schema,
+            field_names,
+        })
     }
 
     pub fn parse_payload(&self, payload: &str) -> Result<Vec<Arc<dyn Array>>, CsvCodecError> {
@@ -95,7 +105,9 @@ impl CsvCodec {
 
         // Check for empty payload
         if parts.is_empty() {
-            return Err(CsvCodecError::SchemaMismatch("Payload cannot be empty".to_string()));
+            return Err(CsvCodecError::SchemaMismatch(
+                "Payload cannot be empty".to_string(),
+            ));
         }
 
         // Check if payload has correct number of fields
@@ -121,37 +133,43 @@ impl CsvCodec {
             }
 
             match field.data_type() {
-                DataType::Int32 => {
-                    match value.parse::<i32>() {
-                        Ok(num) => arrays.push(Arc::new(Int32Array::from(vec![num])) as Arc<dyn Array>),
-                        Err(_) => return Err(CsvCodecError::TypeError(format!(
+                DataType::Int32 => match value.parse::<i32>() {
+                    Ok(num) => arrays.push(Arc::new(Int32Array::from(vec![num])) as Arc<dyn Array>),
+                    Err(_) => {
+                        return Err(CsvCodecError::TypeError(format!(
                             "Failed to parse {} as Int32 for field {}",
                             value,
                             field.name()
-                        ))),
+                        )));
                     }
-                }
-                DataType::Float64 => {
-                    match value.parse::<f64>() {
-                        Ok(num) => arrays.push(Arc::new(Float64Array::from(vec![num])) as Arc<dyn Array>),
-                        Err(_) => return Err(CsvCodecError::TypeError(format!(
+                },
+                DataType::Float64 => match value.parse::<f64>() {
+                    Ok(num) => {
+                        arrays.push(Arc::new(Float64Array::from(vec![num])) as Arc<dyn Array>)
+                    }
+                    Err(_) => {
+                        return Err(CsvCodecError::TypeError(format!(
                             "Failed to parse {} as Float64 for field {}",
                             value,
                             field.name()
-                        ))),
+                        )));
                     }
-                }
-                DataType::Boolean => {
-                    match value.to_lowercase().as_str() {
-                        "true" | "1" => arrays.push(Arc::new(BooleanArray::from(vec![true]))as Arc<dyn Array>),
-                        "false" | "0" => arrays.push(Arc::new(BooleanArray::from(vec![false]))as Arc<dyn Array>),
-                        _ => return Err(CsvCodecError::TypeError(format!(
+                },
+                DataType::Boolean => match value.to_lowercase().as_str() {
+                    "true" | "1" => {
+                        arrays.push(Arc::new(BooleanArray::from(vec![true])) as Arc<dyn Array>)
+                    }
+                    "false" | "0" => {
+                        arrays.push(Arc::new(BooleanArray::from(vec![false])) as Arc<dyn Array>)
+                    }
+                    _ => {
+                        return Err(CsvCodecError::TypeError(format!(
                             "Failed to parse {} as Boolean for field {}. Expected 'true', 'false', '1', or '0'",
                             value,
                             field.name()
-                        ))),
+                        )));
                     }
-                }
+                },
                 DataType::Utf8 => {
                     // For Utf8, we just need to ensure the value is not empty
                     let mut builder = StringBuilder::new();
@@ -162,28 +180,31 @@ impl CsvCodec {
                     match NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
                         Ok(dt) => {
                             let ts = dt.and_utc().timestamp_nanos_opt().unwrap();
-                            arrays.push(Arc::new(TimestampNanosecondArray::from(vec![ts])) as Arc<dyn Array>);
+                            arrays.push(Arc::new(TimestampNanosecondArray::from(vec![ts]))
+                                as Arc<dyn Array>);
                         }
-                        Err(_) => return Err(CsvCodecError::TypeError(format!(
-                            "Failed to parse {} as Timestamp for field {}. Expected format: YYYY-MM-DD HH:MM:SS",
-                            value,
-                            field.name()
-                        ))),
+                        Err(_) => {
+                            return Err(CsvCodecError::TypeError(format!(
+                                "Failed to parse {} as Timestamp for field {}. Expected format: YYYY-MM-DD HH:MM:SS",
+                                value,
+                                field.name()
+                            )));
+                        }
                     }
                 }
-                DataType::Date32 => {
-                    match NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-                        Ok(date) => {
-                            let days = date.num_days_from_ce();
-                            arrays.push(Arc::new(Date32Array::from(vec![days]))as Arc<dyn Array>);
-                        }
-                        Err(_) => return Err(CsvCodecError::TypeError(format!(
+                DataType::Date32 => match NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+                    Ok(date) => {
+                        let days = date.num_days_from_ce();
+                        arrays.push(Arc::new(Date32Array::from(vec![days])) as Arc<dyn Array>);
+                    }
+                    Err(_) => {
+                        return Err(CsvCodecError::TypeError(format!(
                             "Failed to parse {} as Date for field {}. Expected format: YYYY-MM-DD",
                             value,
                             field.name()
-                        ))),
+                        )));
                     }
-                }
+                },
                 other => {
                     return Err(CsvCodecError::TypeError(format!(
                         "Unsupported data type: {} for field {}",
@@ -205,11 +226,13 @@ impl CsvCodec {
         let first_len = arrays.first().map(|a| a.len()).unwrap_or(0);
         for array in &arrays[1..] {
             if array.len() != first_len {
-                return Err(CsvCodecError::InvalidFormat("Array lengths don't match".to_string()));
+                return Err(CsvCodecError::InvalidFormat(
+                    "Array lengths don't match".to_string(),
+                ));
             }
         }
-        
-       RecordBatch::try_new(self.schema.clone(), arrays)
+
+        RecordBatch::try_new(self.schema.clone(), arrays)
             .map_err(|e| CsvCodecError::InvalidFormat(e.to_string()))
     }
 }

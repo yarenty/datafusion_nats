@@ -1,20 +1,23 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::{SchemaRef};
-use async_trait::async_trait;
-use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::{Result, DataFusionError};
-use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType, SendableRecordBatchStream, stream::RecordBatchStreamAdapter, PlanProperties, Partitioning};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_expr::EquivalenceProperties;
-use futures::stream::StreamExt;
-use async_nats::Client;
-use tokio::sync::Mutex;
 use crate::batch_buffer::BatchBuffer;
 use crate::codec::csv::CsvCodec;
 use crate::executor::NatsExec;
+use async_nats::Client;
+use async_trait::async_trait;
+use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::datasource::{TableProvider, TableType};
+use datafusion::error::{DataFusionError, Result};
+use datafusion::logical_expr::Expr;
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
+};
+use futures::stream::StreamExt;
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub struct NatsDataSource {
@@ -22,12 +25,24 @@ pub struct NatsDataSource {
     client: Client,
     subject: String,
     codec: CsvCodec,
-    buffer: BatchBuffer
+    buffer: BatchBuffer,
 }
 
 impl NatsDataSource {
-    pub fn new(schema: SchemaRef, client: Client, subject: String, codec: CsvCodec, buffer: BatchBuffer) -> Self {
-        Self { schema, client, subject, codec, buffer }
+    pub fn new(
+        schema: SchemaRef,
+        client: Client,
+        subject: String,
+        codec: CsvCodec,
+        buffer: BatchBuffer,
+    ) -> Self {
+        Self {
+            schema,
+            client,
+            subject,
+            codec,
+            buffer,
+        }
     }
 }
 
@@ -58,7 +73,10 @@ impl TableProvider for NatsDataSource {
                 EquivalenceProperties::new(self.schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Both,
-                Boundedness::Unbounded { requires_infinite_memory: false }),
+                Boundedness::Unbounded {
+                    requires_infinite_memory: false,
+                },
+            ),
             client: self.client.clone(),
             subject: self.subject.clone(),
             filters: filters.to_vec(),
