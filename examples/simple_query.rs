@@ -1,5 +1,6 @@
 use anyhow::Result;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::util::pretty;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use std::sync::Arc;
 use tokio::time::{Duration, sleep};
@@ -9,6 +10,7 @@ use tracing_subscriber;
 use datafusion_nats::batch_buffer::{BatchBuffer, BatchBufferConfig};
 use datafusion_nats::codec::csv::CsvCodec;
 use datafusion_nats::{data_source::NatsDataSource, nats_connection};
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -81,9 +83,26 @@ async fn main() -> Result<()> {
     let df = ctx.sql("SELECT * FROM nats_table").await?;
     info!("SQL query executed.");
 
+    let mut stream = df.execute_stream().await?;
     info!("Showing results...");
+    while let Some(batch_result) = stream.next().await {
+        match batch_result {
+            Ok(batch) => {
+                println!("SQL streaming batch with {} rows", batch.num_rows());
+                // Process batch
+                // println!("{:?}", batch); // Process batch
+                println!("{}", pretty::pretty_format_batches(&[batch])?);
+            }
+            Err(e) => {
+                eprintln!("SQL stream error: {}", e);
+                break;
+            }
+        }
+        println!("\n ------> to finish press Ctrl+C (this is continuous streaming example)");
+    }
+
     // Print the results
-    df.show().await?;
+    // df.show().await?;
     info!("Results shown.");
 
     Ok(())

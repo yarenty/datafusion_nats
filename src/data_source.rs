@@ -3,21 +3,21 @@ use std::sync::Arc;
 
 use crate::batch_buffer::BatchBuffer;
 use crate::codec::csv::CsvCodec;
-use crate::executor::NatsExec;
+use crate::executor::{NatsStreamConfig, NatsStreamMetrics, NatsStreamingExec};
 use async_nats::Client;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::{DataFusionError, Result};
+use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
+   ExecutionPlan, Partitioning, PlanProperties,
+
 };
 use futures::stream::StreamExt;
-use tokio::sync::Mutex;
+
 
 #[derive(Debug)]
 pub struct NatsDataSource {
@@ -67,7 +67,7 @@ impl TableProvider for NatsDataSource {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let exec = NatsExec {
+        let exec = NatsStreamingExec {
             schema: self.schema.clone(),
             properties: PlanProperties::new(
                 EquivalenceProperties::new(self.schema.clone()),
@@ -82,7 +82,15 @@ impl TableProvider for NatsDataSource {
             filters: filters.to_vec(),
             limit,
             codec: self.codec.clone(),
-            buffer: Arc::new(Mutex::new(self.buffer.clone())), //self.buffer.clone()
+            config: NatsStreamConfig {
+                buffer_size: 100,
+                batch_size: 10,
+                batch_timeout: std::time::Duration::from_millis(100),
+                max_concurrent_messages: 100,
+                enable_backpressure: true,
+            },
+            metrics: Arc::new(NatsStreamMetrics::default()),
+            // buffer: Arc::new(Mutex::new(self.buffer.clone())), //self.buffer.clone()
         };
         Ok(Arc::new(exec))
     }
