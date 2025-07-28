@@ -12,12 +12,8 @@ use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{
-   ExecutionPlan, Partitioning, PlanProperties,
-
-};
+use datafusion::physical_plan::{ExecutionPlan, Partitioning, PlanProperties};
 use futures::stream::StreamExt;
-
 
 #[derive(Debug)]
 pub struct NatsDataSource {

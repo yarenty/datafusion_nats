@@ -80,10 +80,10 @@ async fn main() -> Result<()> {
     // Execute a SQL query
     // let df = ctx.sql("SELECT * FROM nats_table limit 3").await?;
     //TODO: FIXME
-    let df = ctx.sql("SELECT * FROM nats_table").await?;
+    let df = ctx.sql("SELECT * FROM nats_table limit 3").await?;
     info!("SQL query executed.");
 
-    let mut stream = df.execute_stream().await?;
+    let mut stream = df.clone().execute_stream().await?;
     info!("Showing results...");
     while let Some(batch_result) = stream.next().await {
         match batch_result {

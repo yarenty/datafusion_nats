@@ -129,8 +129,11 @@ impl BufferState {
 
     fn should_flush(&self, batch_size: usize) -> bool {
         self.current_size >= batch_size
-            || self.current_size > 0 && self.last_flush.elapsed() >= self.flush_timeout
             || self.current_size >= self.max_size
+    }
+
+    fn should_flush_timeout(&self) -> bool {
+        self.current_size > 0 && self.last_flush.elapsed() >= self.flush_timeout
     }
 
     fn is_full(&self) -> bool {
@@ -146,7 +149,6 @@ impl BufferState {
         self.last_flush = Instant::now();
     }
 }
-
 #[derive(Debug)]
 pub struct NatsStreamingExec {
     pub schema: SchemaRef,
@@ -246,18 +248,21 @@ impl NatsStreamingExec {
             }
         };
 
-        // Create flush interval for time-based batching
+        // Create flush interval for time-based batching - this is critical for streaming!
         let mut flush_interval = tokio::time::interval(config.batch_timeout);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut records_processed = 0usize;
+        let mut last_message_time = Instant::now();
 
+        // Keep the consumer running indefinitely for true streaming
         loop {
             tokio::select! {
                 // Handle incoming NATS messages
                 message = subscriber.next() => {
                     match message {
                         Some(message) => {
+                            last_message_time = Instant::now();
                             metrics.increment_received().await;
 
                             // Apply backpressure if buffer is full
@@ -282,8 +287,9 @@ impl NatsStreamingExec {
                                     records_processed += 1;
                                     metrics.increment_processed().await;
 
-                                    // Check if we should create a batch
-                                    if buffer_state.should_flush(config.batch_size) {
+                                    // Check if we should create a batch based on size
+                                    if buffer_state.current_size >= config.batch_size {
+                                        tracing::debug!("Flushing due to batch size: {}", buffer_state.current_size);
                                         if let Err(e) = Self::flush_buffer(&buffer, &sender, &metrics, &mut buffer_state).await {
                                             tracing::error!("Failed to flush buffer: {}", e);
                                             break;
@@ -307,27 +313,38 @@ impl NatsStreamingExec {
                             }
                         }
                         None => {
-                            tracing::info!("NATS subscription ended");
-                            // Flush any remaining data
-                            let _ = Self::flush_buffer(&buffer, &sender, &metrics, &mut buffer_state).await;
-                            break;
+                            tracing::info!("NATS subscription ended, but continuing to stream buffered data");
+                            // Don't break here for streaming! Instead, flush and continue waiting
+                            if buffer_state.current_size > 0 {
+                                let _ = Self::flush_buffer(&buffer, &sender, &metrics, &mut buffer_state).await;
+                            }
+                            // For true streaming, we don't exit when there are no messages
+                            // The stream should stay alive waiting for new messages
                         }
                     }
                 }
 
-                // Handle periodic flushing
+                // CRITICAL: Handle periodic flushing - this ensures streaming behavior!
                 _ = flush_interval.tick() => {
-                    if buffer_state.current_size > 0 && buffer_state.should_flush(config.batch_size) {
+                    tracing::debug!("Flush interval tick - buffer size: {}", buffer_state.current_size);
+
+                    // Always try to flush if we have data, regardless of time elapsed
+                    if buffer_state.current_size > 0 {
+                        tracing::debug!("Time-based flush triggered with {} records", buffer_state.current_size);
                         if let Err(e) = Self::flush_buffer(&buffer, &sender, &metrics, &mut buffer_state).await {
                             tracing::error!("Failed to flush buffer on timeout: {}", e);
-                            break;
+                            // Don't break - continue streaming
                         }
                     }
+
+                    // Optional: Add heartbeat or keep-alive logic here
+                    // This ensures the stream stays active even with no messages
                 }
             }
-        }
 
-        tracing::info!("NATS streaming consumer finished");
+            // Add a small yield to prevent busy waiting
+            tokio::task::yield_now().await;
+        }
     }
 
     async fn flush_buffer(
@@ -361,7 +378,6 @@ impl NatsStreamingExec {
         }
     }
 }
-
 impl DisplayAs for NatsStreamingExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
